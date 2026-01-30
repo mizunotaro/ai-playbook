@@ -92,6 +92,28 @@ jobs:
           fi
           gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:ready" --add-label "ai:in-progress"
 
+      - name: Skip if an open PR already references this issue
+        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
+        id: existing_pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISSUE="${{ steps.pick.outputs.issue }}"
+
+          # If an open PR already references this Issue number, don't re-run the agent.
+          PRS_JSON=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,title,body)
+          PR=$(echo "$PRS_JSON" | jq -r --arg issue "$ISSUE" 'map(select((.title + "\n" + (.body // "")) | test("#" + $issue; "i"))) | .[0].number // empty')
+
+          if [ -n "$PR" ]; then
+            echo "Found existing open PR #$PR for Issue #$ISSUE. Skipping."
+            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "Open PR #$PR already references this issue. Marking as ai:blocked to prevent re-run."
+            gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:blocked"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
       - name: Build prompt (workspace + git-exclude)
         if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
         id: prompt
@@ -117,6 +139,10 @@ jobs:
           - Keep the diff minimal. Avoid broad refactors.
           - Add/adjust tests if applicable.
           - Do not edit secrets, CI credentials, or security-sensitive configs.
+          - Work on the CURRENTLY CHECKED-OUT BRANCH (do NOT create/switch branches).
+          - Do NOT run `git checkout -b` or change the branch name.
+          - Do NOT run `gh pr create` / `gh pr edit`. The OpenCode runner will create/update the PR.
+          - Do NOT `git push`. Commit only; the runner will push.
           - If the task is ambiguous, STOP and write a short question in the PR description.
 
           COMMIT MESSAGE FORMAT (EN + JP):
@@ -131,7 +157,7 @@ jobs:
           echo "Issue body (truncated):" >> "$PROMPT_PATH"
           echo "$BODY" >> "$PROMPT_PATH"
           echo "" >> "$PROMPT_PATH"
-          echo "Deliverable: open a PR and reference Issue #$ISSUE." >> "$PROMPT_PATH"
+          echo "Deliverable: commit the minimal changes on the current branch; OpenCode will create the PR automatically. Ensure the PR description references (e.g., \"Closes #$ISSUE\")." >> "$PROMPT_PATH"
 
           echo "path=$PROMPT_PATH" >> "$GITHUB_OUTPUT"
 
