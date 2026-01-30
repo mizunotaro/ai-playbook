@@ -111,7 +111,7 @@ jobs:
 
       - name: Run OpenCode
         if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
-        uses: anomalyco/opencode@latest
+        uses: anomalyco/opencode/github@latest
         with:
           model: ${{ inputs.model }}
           prompt: ${{ steps.prompt.outputs.path }}
