@@ -1,0 +1,97 @@
+name: Reusable - AI Orchestrator
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        required: true
+    secrets:
+      ZAI_API_KEY:
+        required: true
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45  # JP: 長時間化防止 / EN: prevent runaway
+
+    steps:
+      - name: Preflight (mode / limits)
+        shell: bash
+        run: |
+          echo "AI_AUTOMATION_MODE=${{ vars.AI_AUTOMATION_MODE }}"
+          if [ "${{ vars.AI_AUTOMATION_MODE }}" != "RUN" ]; then
+            echo "Automation paused. Exiting."
+            exit 0
+          fi
+
+      - name: Check open AI PR count
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MAX="${{ vars.AI_MAX_OPEN_AI_PRS }}"
+          [ -z "$MAX" ] && MAX="1"
+          OPEN_AI_PRS=$(gh pr list --state open --label "ai:in-progress" --json number --jq 'length')
+          echo "OPEN_AI_PRS=$OPEN_AI_PRS MAX=$MAX"
+          if [ "$OPEN_AI_PRS" -ge "$MAX" ]; then
+            echo "Too many open AI PRs. Exiting."
+            exit 0
+          fi
+
+      - name: Pick next issue from queue
+        id: pick
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE=$(gh api /search/issues -f q="repo:${GITHUB_REPOSITORY} is:issue is:open label:ai:ready -label:ai:blocked sort:created-asc" --jq '.items[0].number // empty')
+          echo "issue=$ISSUE" >> $GITHUB_OUTPUT
+          if [ -z "$ISSUE" ]; then
+            echo "No queued issues."
+            exit 0
+          fi
+          gh issue edit "$ISSUE" --remove-label "ai:ready" --add-label "ai:in-progress"
+
+      - name: Build prompt (bilingual guardrails)
+        id: prompt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE="${{ steps.pick.outputs.issue }}"
+          TITLE=$(gh issue view "$ISSUE" --json title --jq '.title')
+          BODY=$(gh issue view "$ISSUE" --json body --jq '.body' | head -c 12000)
+
+          cat > PROMPT.txt << 'EOF'
+You are the Implementation Agent.
+
+NON-NEGOTIABLE GUARDRAILS:
+- Do NOT change dependencies unless the issue has label "ai:deps".
+- Keep the diff minimal. Avoid broad refactors.
+- Add/adjust tests if applicable.
+- Do not edit secrets, CI credentials, or security-sensitive configs.
+- If the task is ambiguous, STOP and write a short question in the PR description.
+
+COMMIT MESSAGE FORMAT (EN + JP):
+- First line: conventional commit in English
+- Second line: Japanese summary
+
+TASK:
+EOF
+          echo "Work on GitHub Issue #$ISSUE: $TITLE" >> PROMPT.txt
+          echo "" >> PROMPT.txt
+          echo "Issue body (truncated):" >> PROMPT.txt
+          echo "$BODY" >> PROMPT.txt
+          echo "" >> PROMPT.txt
+          echo "Deliverable: open a PR, label it ai:in-progress, and reference Issue #$ISSUE." >> PROMPT.txt
+
+          echo "path=PROMPT.txt" >> $GITHUB_OUTPUT
+
+      - name: Run OpenCode (GLM 4.7)
+        uses: anomalyco/opencode/github@latest
+        with:
+          model: ${{ inputs.model }}
+          prompt: ${{ steps.prompt.outputs.path }}
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
