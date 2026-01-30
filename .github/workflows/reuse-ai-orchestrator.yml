@@ -7,16 +7,18 @@ on:
         type: string
         required: true
     secrets:
+      # Either name is accepted; we normalize inside the job.
       ZAI_API_KEY:
-        required: true
+        required: false
+      ZHIPU_API_KEY:
+        required: false
 
 jobs:
   orchestrate:
     runs-on: ubuntu-latest
     timeout-minutes: 45  # JP: 長時間化防止 / EN: prevent runaway
 
-    # NOTE: Reusable workflows inherit GITHUB_TOKEN permissions from the caller workflow.
-    # The effective permissions are the intersection of caller + this file.
+    # Effective permissions are the intersection of caller + this job.
     permissions:
       id-token: write
       contents: write
@@ -28,7 +30,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
 
     steps:
-      - name: Preflight (mode / limits)
+      - name: Preflight (mode)
         id: preflight
         shell: bash
         run: |
@@ -39,6 +41,24 @@ jobs:
             exit 0
           fi
           echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize provider API key env
+        id: keys
+        if: steps.preflight.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_KEY="${{ secrets.ZAI_API_KEY }}"
+          if [ -z "${API_KEY}" ]; then
+            API_KEY="${{ secrets.ZHIPU_API_KEY }}"
+          fi
+          if [ -z "${API_KEY}" ]; then
+            echo "::error::Missing secret: set either ZAI_API_KEY or ZHIPU_API_KEY in the caller repo."
+            exit 1
+          fi
+          # Export both names for compatibility with OpenCode providers.
+          echo "ZAI_API_KEY=${API_KEY}" >> "$GITHUB_ENV"
+          echo "ZHIPU_API_KEY=${API_KEY}" >> "$GITHUB_ENV"
 
       - name: Check open AI PR count
         id: prgate
@@ -58,7 +78,7 @@ jobs:
 
       - name: Checkout
         if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -106,15 +126,28 @@ jobs:
           echo "Issue body (truncated):" >> PROMPT.txt
           echo "$BODY" >> PROMPT.txt
           echo "" >> PROMPT.txt
-          echo "Deliverable: open a PR, label it ai:in-progress, and reference Issue #$ISSUE." >> PROMPT.txt
+          echo "Deliverable: open a PR and reference Issue #$ISSUE." >> PROMPT.txt
 
           echo "path=PROMPT.txt" >> "$GITHUB_OUTPUT"
 
       - name: Run OpenCode
+        id: oc
         if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
+        continue-on-error: true
         uses: anomalyco/opencode/github@latest
         with:
           model: ${{ inputs.model }}
           prompt: ${{ steps.prompt.outputs.path }}
         env:
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          # Keep explicit for clarity, although we also export via GITHUB_ENV above.
+          ZAI_API_KEY: ${{ env.ZAI_API_KEY }}
+          ZHIPU_API_KEY: ${{ env.ZHIPU_API_KEY }}
+
+      - name: Revert issue label and fail if OpenCode failed
+        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != '' && steps.oc.outcome != 'success'
+        shell: bash
+        run: |
+          ISSUE="${{ steps.pick.outputs.issue }}"
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
+          echo "::error::OpenCode failed. Reverted Issue #$ISSUE label back to ai:ready."
+          exit 1
