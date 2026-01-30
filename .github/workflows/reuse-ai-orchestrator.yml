@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 45  # JP: 長時間化防止 / EN: prevent runaway
 
     # NOTE: Reusable workflows inherit GITHUB_TOKEN permissions from the caller workflow.
-    # Ensure the caller workflow grants at least these permissions.
+    # The effective permissions are the intersection of caller + this file.
     permissions:
       contents: write
       pull-requests: write
@@ -66,7 +66,7 @@ jobs:
         id: pick
         shell: bash
         run: |
-          ISSUE=$(gh api /search/issues -f q="repo:${GITHUB_REPOSITORY} is:issue is:open label:ai:ready -label:ai:blocked sort:created-asc" --jq '.items[0].number // empty')
+          ISSUE=$(gh api -X GET search/issues             -f q="repo:${GITHUB_REPOSITORY} is:issue is:open label:ai:ready -label:ai:blocked sort:created-asc"             --jq '.items[0].number // empty')
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
           if [ -z "$ISSUE" ]; then
             echo "No queued issues."
