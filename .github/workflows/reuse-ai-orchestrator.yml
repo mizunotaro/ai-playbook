@@ -104,7 +104,9 @@ jobs:
           TITLE=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json title --jq '.title')
           BODY=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json body --jq '.body' | head -c 12000)
 
-          cat > PROMPT.txt << 'EOF'
+          PROMPT_PATH="$RUNNER_TEMP/PROMPT.txt"
+
+          cat > "$PROMPT_PATH" << 'EOF'
           You are the Implementation Agent.
 
           NON-NEGOTIABLE GUARDRAILS:
@@ -121,14 +123,14 @@ jobs:
           TASK:
           EOF
 
-          echo "Work on GitHub Issue #$ISSUE: $TITLE" >> PROMPT.txt
-          echo "" >> PROMPT.txt
-          echo "Issue body (truncated):" >> PROMPT.txt
-          echo "$BODY" >> PROMPT.txt
-          echo "" >> PROMPT.txt
-          echo "Deliverable: open a PR and reference Issue #$ISSUE." >> PROMPT.txt
+          echo "Work on GitHub Issue #$ISSUE: $TITLE" >> "$PROMPT_PATH"
+          echo "" >> "$PROMPT_PATH"
+          echo "Issue body (truncated):" >> "$PROMPT_PATH"
+          echo "$BODY" >> "$PROMPT_PATH"
+          echo "" >> "$PROMPT_PATH"
+          echo "Deliverable: open a PR and reference Issue #$ISSUE." >> "$PROMPT_PATH"
 
-          echo "path=PROMPT.txt" >> "$GITHUB_OUTPUT"
+          echo "path=$PROMPT_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Run OpenCode
         id: oc
@@ -138,10 +140,6 @@ jobs:
         with:
           model: ${{ inputs.model }}
           prompt: ${{ steps.prompt.outputs.path }}
-        env:
-          # Keep explicit for clarity, although we also export via GITHUB_ENV above.
-          ZAI_API_KEY: ${{ env.ZAI_API_KEY }}
-          ZHIPU_API_KEY: ${{ env.ZHIPU_API_KEY }}
 
       - name: Revert issue label and fail if OpenCode failed
         if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != '' && steps.oc.outcome != 'success'
