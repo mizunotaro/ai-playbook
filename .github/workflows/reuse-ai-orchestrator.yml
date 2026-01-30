@@ -18,6 +18,7 @@ jobs:
     # NOTE: Reusable workflows inherit GITHUB_TOKEN permissions from the caller workflow.
     # The effective permissions are the intersection of caller + this file.
     permissions:
+      id-token: write
       contents: write
       pull-requests: write
       issues: write
