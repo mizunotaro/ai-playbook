@@ -1,0 +1,27 @@
+name: Reusable - AI Watchdog
+
+on:
+  workflow_call: {}
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Detect repeated failures (last 24h) and raise triage
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # JP: 直近のCI失敗回数（例） / EN: count recent CI failures
+          FAILS=$(gh run list --workflow "CI" --limit 50 --json conclusion,createdAt \
+            --jq '[.[] | select(.conclusion=="failure")] | length')
+          echo "Recent CI failures (sample window) = $FAILS"
+
+          if [ "$FAILS" -ge 3 ]; then
+            gh issue create \
+              --title "AI Watchdog: PAUSE recommended (failures=$FAILS)" \
+              --body "Detected frequent CI failures. Recommend setting AI_AUTOMATION_MODE=PAUSE and running triage." \
+              --label "ai:triage"
+          fi

@@ -1,0 +1,41 @@
+name: Reusable - AI Daily
+
+on:
+  workflow_call: {}
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Post daily summary to GitHub issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # JP: ここでは簡易集計 / EN: simple counters
+          OPEN_READY=$(gh issue list --state open --label "ai:ready" --json number --jq 'length')
+          OPEN_BLOCKED=$(gh issue list --state open --label "ai:blocked" --json number --jq 'length')
+          OPEN_AI_PRS=$(gh pr list --state open --label "ai:in-progress" --json number --jq 'length')
+
+          BODY=$(cat << EOF
+## Daily AI Report (UTC) - $(date -u +"%Y-%m-%d")
+
+- Queue (ai:ready): $OPEN_READY
+- Blocked (ai:blocked): $OPEN_BLOCKED
+- Open AI PRs (ai:in-progress): $OPEN_AI_PRS
+
+Decision points (if any):
+- If blocked > 0: review ai:blocked issues and decide: approve / clarify / pause.
+
+EOF
+)
+
+          # JP: 固定Issueが無い場合は作る / EN: create if missing
+          DASH_ID=$(gh issue list --state open --search "AI Ops Dashboard" --json number --jq '.[0].number // empty')
+          if [ -z "$DASH_ID" ]; then
+            DASH_ID=$(gh issue create --title "AI Ops Dashboard" --body "Daily reports will be posted here." --label "ai:triage" --json number --jq '.number')
+          fi
+
+          gh issue comment "$DASH_ID" --body "$BODY"
