@@ -7,7 +7,6 @@ on:
         type: string
         required: true
     secrets:
-      # Either name is accepted; we normalize inside the job.
       ZAI_API_KEY:
         required: false
       ZHIPU_API_KEY:
@@ -16,9 +15,8 @@ on:
 jobs:
   orchestrate:
     runs-on: ubuntu-latest
-    timeout-minutes: 45  # JP: 長時間化防止 / EN: prevent runaway
+    timeout-minutes: 45
 
-    # Effective permissions are the intersection of caller + this job.
     permissions:
       id-token: write
       contents: write
@@ -56,7 +54,6 @@ jobs:
             echo "::error::Missing secret: set either ZAI_API_KEY or ZHIPU_API_KEY in the caller repo."
             exit 1
           fi
-          # Export both names for compatibility with OpenCode providers.
           echo "ZAI_API_KEY=${API_KEY}" >> "$GITHUB_ENV"
           echo "ZHIPU_API_KEY=${API_KEY}" >> "$GITHUB_ENV"
 
@@ -95,16 +92,22 @@ jobs:
           fi
           gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:ready" --add-label "ai:in-progress"
 
-      - name: Build prompt (bilingual guardrails)
+      - name: Build prompt (workspace + git-exclude)
         if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
         id: prompt
         shell: bash
         run: |
+          set -euo pipefail
           ISSUE="${{ steps.pick.outputs.issue }}"
           TITLE=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json title --jq '.title')
           BODY=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json body --jq '.body' | head -c 12000)
 
-          PROMPT_PATH="$RUNNER_TEMP/PROMPT.txt"
+          # Put prompt in workspace (some agent toolchains can't read outside workspace),
+          # but make sure it can never show up in git status / commits.
+          mkdir -p .opencode_tmp
+          echo ".opencode_tmp/" >> .git/info/exclude
+
+          PROMPT_PATH="$GITHUB_WORKSPACE/.opencode_tmp/PROMPT.txt"
 
           cat > "$PROMPT_PATH" << 'EOF'
           You are the Implementation Agent.
