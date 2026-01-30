@@ -15,70 +15,91 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45  # JP: 長時間化防止 / EN: prevent runaway
 
+    # NOTE: Reusable workflows inherit GITHUB_TOKEN permissions from the caller workflow.
+    # Ensure the caller workflow grants at least these permissions.
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
     steps:
       - name: Preflight (mode / limits)
+        id: preflight
         shell: bash
         run: |
           echo "AI_AUTOMATION_MODE=${{ vars.AI_AUTOMATION_MODE }}"
           if [ "${{ vars.AI_AUTOMATION_MODE }}" != "RUN" ]; then
             echo "Automation paused. Exiting."
+            echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
 
       - name: Check open AI PR count
+        id: prgate
+        if: steps.preflight.outputs.run == 'true'
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           MAX="${{ vars.AI_MAX_OPEN_AI_PRS }}"
           [ -z "$MAX" ] && MAX="1"
-          OPEN_AI_PRS=$(gh pr list --state open --label "ai:in-progress" --json number --jq 'length')
+          OPEN_AI_PRS=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "ai:in-progress" --json number --jq 'length')
           echo "OPEN_AI_PRS=$OPEN_AI_PRS MAX=$MAX"
           if [ "$OPEN_AI_PRS" -ge "$MAX" ]; then
             echo "Too many open AI PRs. Exiting."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Pick next issue from queue
+        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true'
         id: pick
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           ISSUE=$(gh api /search/issues -f q="repo:${GITHUB_REPOSITORY} is:issue is:open label:ai:ready -label:ai:blocked sort:created-asc" --jq '.items[0].number // empty')
-          echo "issue=$ISSUE" >> $GITHUB_OUTPUT
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
           if [ -z "$ISSUE" ]; then
             echo "No queued issues."
             exit 0
           fi
-          gh issue edit "$ISSUE" --remove-label "ai:ready" --add-label "ai:in-progress"
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:ready" --add-label "ai:in-progress"
 
       - name: Build prompt (bilingual guardrails)
+        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
         id: prompt
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           ISSUE="${{ steps.pick.outputs.issue }}"
-          TITLE=$(gh issue view "$ISSUE" --json title --jq '.title')
-          BODY=$(gh issue view "$ISSUE" --json body --jq '.body' | head -c 12000)
+          TITLE=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json title --jq '.title')
+          BODY=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json body --jq '.body' | head -c 12000)
 
           cat > PROMPT.txt << 'EOF'
           You are the Implementation Agent.
-          
+
           NON-NEGOTIABLE GUARDRAILS:
           - Do NOT change dependencies unless the issue has label "ai:deps".
           - Keep the diff minimal. Avoid broad refactors.
           - Add/adjust tests if applicable.
           - Do not edit secrets, CI credentials, or security-sensitive configs.
           - If the task is ambiguous, STOP and write a short question in the PR description.
-          
+
           COMMIT MESSAGE FORMAT (EN + JP):
           - First line: conventional commit in English
           - Second line: Japanese summary
-          
+
           TASK:
           EOF
+
           echo "Work on GitHub Issue #$ISSUE: $TITLE" >> PROMPT.txt
           echo "" >> PROMPT.txt
           echo "Issue body (truncated):" >> PROMPT.txt
@@ -86,10 +107,11 @@ jobs:
           echo "" >> PROMPT.txt
           echo "Deliverable: open a PR, label it ai:in-progress, and reference Issue #$ISSUE." >> PROMPT.txt
 
-          echo "path=PROMPT.txt" >> $GITHUB_OUTPUT
+          echo "path=PROMPT.txt" >> "$GITHUB_OUTPUT"
 
-      - name: Run OpenCode (GLM 4.7)
-        uses: anomalyco/opencode/github@latest
+      - name: Run OpenCode
+        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
+        uses: anomalyco/opencode@latest
         with:
           model: ${{ inputs.model }}
           prompt: ${{ steps.prompt.outputs.path }}
