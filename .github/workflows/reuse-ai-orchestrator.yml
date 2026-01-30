@@ -92,7 +92,7 @@ jobs:
         id: pick
         shell: bash
         run: |
-          ISSUE=$(gh api -X GET search/issues             -f q="repo:${GITHUB_REPOSITORY} is:issue is:open label:ai:ready -label:ai:blocked sort:created-asc"             --jq '.items[0].number // empty')
+          ISSUE=$(gh api -X GET search/issues             -f q="repo:${GITHUB_REPOSITORY} is:issue is:open label:ai:ready -label:ai:blocked -label:ai:pr-open sort:created-asc"             --jq '.items[0].number // empty')
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
           if [ -z "$ISSUE" ]; then
             echo "No queued issues."
@@ -114,8 +114,8 @@ jobs:
 
           if [ -n "$PR" ]; then
             echo "Found existing open PR #$PR for Issue #$ISSUE. Skipping."
-            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "Open PR #$PR already references this issue. Marking as ai:blocked to prevent re-run."
-            gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:blocked"
+            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "Open PR #$PR already references this issue. Marking as ai:pr-open to prevent re-run."
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -134,10 +134,9 @@ jobs:
 
           # Put prompt in workspace (some agent toolchains can't read outside workspace),
           # but make sure it can never show up in git status / commits.
-          mkdir -p .opencode_tmp
-          echo ".opencode_tmp/" >> .git/info/exclude
-
-          PROMPT_PATH="$GITHUB_WORKSPACE/.opencode_tmp/PROMPT.txt"
+          PROMPT_DIR="${RUNNER_TEMP}/opencode"
+          mkdir -p "$PROMPT_DIR"
+          PROMPT_PATH="$PROMPT_DIR/PROMPT.txt"
 
           cat > "$PROMPT_PATH" << 'EOF'
           You are the Implementation Agent.
@@ -178,6 +177,27 @@ jobs:
           model: ${{ inputs.model }}
           prompt: ${{ steps.prompt.outputs.path }}
 
+
+      - name: Normalize Issue label to ai:pr-open on successful PR creation
+        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != '' && steps.oc.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISSUE="${{ steps.pick.outputs.issue }}"
+
+          # Find an open PR that references this issue number (e.g., "Closes #<ISSUE>").
+          PR="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,title,body --jq             ".[] | select((.title + "\n" + (.body // "")) | test(\"(^|[^0-9])#${ISSUE}([^0-9]|$)\"); \"i\")) | .number"             | head -n 1)"
+
+          if [ -z "${PR:-}" ]; then
+            echo "No open PR references issue #$ISSUE; leaving labels unchanged."
+            exit 0
+          fi
+
+          if gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"; then
+            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "PR #$PR is open for this issue. Normalized label to \`ai:pr-open\`."
+          else
+            echo "::warning::Failed to set ai:pr-open (label may not exist)."
+          fi
       - name: Revert issue label and fail if OpenCode failed
         if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != '' && steps.oc.outcome != 'success'
         shell: bash
