@@ -72,51 +72,55 @@ jobs:
         run: |
           set -euo pipefail
           MAX="${{ vars.AI_MAX_OPEN_AI_PRS }}"
-          if [ -z "${MAX}" ]; then MAX="2"; fi
-          COUNT=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "ai:in-progress" --json number --jq 'length')
-          echo "Open AI PRs: $COUNT / Max: $MAX"
-          if [ "$COUNT" -ge "$MAX" ]; then
+          [ -z "$MAX" ] && MAX="1"
+          OPEN_AI_PRS=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "ai:in-progress" --json number --jq 'length')
+          echo "OPEN_AI_PRS=$OPEN_AI_PRS MAX=$MAX"
+          if [ "$OPEN_AI_PRS" -ge "$MAX" ]; then
             echo "Too many open AI PRs. Exiting."
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "run=true" >> "$GITHUB_OUTPUT"
-      - name: Pick next ai:ready issue
+      - name: Pick next issue (ai:ready -> ai:in-progress)
         id: pick
         if: steps.prgate.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          ISSUE_NUMBER=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "ai:ready" --state open --json number --jq '.[0].number // empty')
-          if [ -z "${ISSUE_NUMBER}" ]; then
-            echo "No ai:ready issues found."
+
+          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "ai:ready" --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -z "$ISSUE" ]; then
+            echo "No ai:ready issues. Exiting."
             echo "issue=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Picked issue #${ISSUE_NUMBER}"
-          echo "issue=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
 
-      - name: Mark issue in-progress
-        if: steps.pick.outputs.issue != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          ISSUE="${{ steps.pick.outputs.issue }}"
-          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --remove-label "ai:ready" --add-label "ai:in-progress" || true
+          echo "Picked issue #$ISSUE"
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:ready" --add-label "ai:in-progress"
+
+          # Marker comment for recovery/cleanup (e.g., when the job times out)
+          MARKER="opencode-orchestrator-run:${{ github.run_id }} run-number:${{ github.run_number }}"
+          gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "🧭 Orchestrator started. ${MARKER}"
+
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+      - name: "Guard - Skip if no issue"
+        if: steps.pick.outputs.issue == ''
+        run: echo "No issue picked; skipping."
 
       - name: Checkout
         if: steps.pick.outputs.issue != ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
 
-      - name: Install OpenCode CLI
+      - name: Remove checkout auth header (avoid duplicate Authorization)
         if: steps.pick.outputs.issue != ''
         shell: bash
         run: |
-          set -euo pipefail
-          VERSION="${{ inputs.opencode_version }}"
-          echo "Installing OpenCode CLI version: ${VERSION}"
-          curl -fsSL https://opencode.ai/install | bash
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git config --global --unset-all http.https://github.com/.extraheader || true
+
 
       - name: Build prompt (from issue)
         id: prompt
@@ -125,21 +129,23 @@ jobs:
         run: |
           set -euo pipefail
           ISSUE="${{ steps.pick.outputs.issue }}"
+          TITLE=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json title --jq '.title')
+          BODY=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json body --jq '.body')
 
-          TITLE=$(gh issue view "$ISSUE" --repo "$GITHUB_REPOSITORY" --json title --jq '.title')
-          BODY=$(gh issue view "$ISSUE" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')
-
-          PROMPT_PATH="$(mktemp)"
+          PROMPT_PATH="$RUNNER_TEMP/opencode_prompt.txt"
           cat > "$PROMPT_PATH" <<'EOF'
-You are an autonomous coding agent.
-Follow the repository rules and SSOT.
-Be safe: do not exfiltrate secrets. Avoid destructive operations.
-EOF
+          You are an AI DevOps/Staff+Security lead operating inside a GitHub Actions runner.
+
+          Follow these constraints:
+          - Do NOT leak secrets.
+          - Do NOT run destructive commands.
+          - Keep the change small (small PR).
+          - Prefer reproducibility: update SSOT docs if needed (PROJECT_ENV_SPEC.md, PROJECT_CONTEXT.md, AGENTS.md, CHEATSHEET_COMMANDS.md).
+
+          Task:
+          EOF
 
           {
-            echo ""
-            echo "Repository: $GITHUB_REPOSITORY"
-            echo ""
             echo "Issue: #$ISSUE"
             echo "Title: $TITLE"
             echo ""
@@ -151,13 +157,11 @@ EOF
           } >> "$PROMPT_PATH"
 
           # Expose prompt as a multiline output (so OpenCode action receives the prompt text, not a file path)
-          DELIM="EO_PROMPT_${GITHUB_RUN_ID}_${RANDOM}"
           {
-            printf 'prompt<<%s\n' "$DELIM"
+            echo "prompt<<'EO_PROMPT'"
             cat "$PROMPT_PATH"
-            printf '%s\n' "$DELIM"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
-
       - name: Check existing PR for issue (skip if present)
         id: existing_pr
         if: steps.pick.outputs.issue != ''
@@ -171,26 +175,116 @@ EOF
 
           if [ -n "$PR" ]; then
             echo "Found existing open PR (#$PR) for issue #$ISSUE. Skipping OpenCode."
+            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "ℹ️ Existing PR already open: #$PR (skipping OpenCode run)"
+            gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "pr=$PR" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "skip=false" >> "$GITHUB_OUTPUT"
-
+          echo "pr=" >> "$GITHUB_OUTPUT"
       - name: Run OpenCode
-        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip == 'false'
+        id: oc
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
         uses: anomalyco/opencode/github@v1.1.44
+        env:
+          ZAI_API_KEY: ${{ env.ZAI_API_KEY }}
+          ZHIPU_API_KEY: ${{ env.ZHIPU_API_KEY }}
+          OPENCODE_DISABLE_AUTOUPDATE: "true"
+          VERSION: ${{ inputs.opencode_version }}
         with:
           model: ${{ inputs.model }}
           prompt: ${{ steps.prompt.outputs.prompt }}
-          token: ${{ github.token }}
 
-      - name: Post-run: label normalization (best-effort)
-        if: steps.pick.outputs.issue != ''
+      - name: Detect PR created by this run
+        id: pr
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_NO="${{ github.run_number }}"
+
+          # Preferred: match OpenCode's default dispatch branch naming pattern seen in logs: opencode/dispatch-<run_number>-<timestamp>
+          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"opencode/dispatch-${RUN_NO}-\")) | .number" | head -n1)
+
+          # Fallback: any open PR from opencode/* labeled ai:in-progress
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "opencode/*" --label "ai:in-progress" --json number --jq '.[0].number // empty')
+          fi
+
+          if [ -z "$PR" ]; then
+            echo "No PR detected."
+            echo "pr=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Detected PR #$PR"
+            echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Normalize issue label (ai:in-progress -> ai:pr-open)
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true' && steps.pr.outputs.pr != ''
         shell: bash
         run: |
           set -euo pipefail
           ISSUE="${{ steps.pick.outputs.issue }}"
-          # If PR created by OpenCode, repo conventions may vary; keep minimal and safe here.
-          # Caller repo can add stronger normalization if needed.
-          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --remove-label "ai:in-progress" --add-label "ai:blocked" || true
+          PR="${{ steps.pr.outputs.pr }}"
+          gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "✅ PR opened: #$PR"
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"
+      - name: Revert issue label on failure (ai:in-progress -> ai:ready)
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true' && steps.pr.outputs.pr == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISSUE="${{ steps.pick.outputs.issue }}"
+          gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "⚠️ OpenCode did not create a PR in this run. Returning to ai:ready."
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
+
+  cleanup_on_timeout_or_failure:
+    needs: [orchestrate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      issues: write
+      pull-requests: read
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Recovery (revert ai:in-progress if orchestrator did not finish cleanly)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Only attempt recovery when the main job didn't succeed.
+          RESULT="${{ needs.orchestrate.result }}"
+          if [ "$RESULT" = "success" ]; then
+            echo "Main job succeeded; nothing to recover."
+            exit 0
+          fi
+
+          MARKER="opencode-orchestrator-run:${{ github.run_id }}"
+          ISSUE=$(gh api -X GET search/issues -f q="repo:${GITHUB_REPOSITORY} is:issue is:open label:ai:in-progress ${MARKER}" --jq '.items[0].number // empty')
+
+          if [ -z "$ISSUE" ]; then
+            echo "No matching ai:in-progress issue found for this run."
+            exit 0
+          fi
+
+          echo "Found in-progress issue #$ISSUE for this run."
+
+          RUN_NO="${{ github.run_number }}"
+          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"opencode/dispatch-${RUN_NO}-\")) | .number" | head -n1 || true)
+
+          if [ -n "$PR" ]; then
+            echo "PR exists (#$PR). Normalizing issue to ai:pr-open."
+            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "✅ (Recovery) PR detected after timeout/failure: #$PR"
+            gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"
+            exit 0
+          fi
+
+          echo "No PR detected. Returning issue to ai:ready."
+          gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "⏱️ (Recovery) Orchestrator job ended as '${RESULT}' without opening a PR. Returning to ai:ready."
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
