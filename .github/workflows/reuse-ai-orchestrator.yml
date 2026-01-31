@@ -11,11 +11,6 @@ on:
         type: string
         required: false
         default: "1.1.44"
-      opencode_action_ref:
-        description: "Git ref (tag/sha) for anomalyco/opencode GitHub Action (path: /github)."
-        type: string
-        required: false
-        default: "v1.1.44"
       job_timeout_minutes:
         description: "Job timeout (minutes) for the orchestrator job."
         type: number
@@ -119,6 +114,14 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Remove checkout auth header (avoid duplicate Authorization)
+        if: steps.pick.outputs.issue != ''
+        shell: bash
+        run: |
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git config --global --unset-all http.https://github.com/.extraheader || true
+
+
       - name: Build prompt (from issue)
         id: prompt
         if: steps.pick.outputs.issue != ''
@@ -181,10 +184,10 @@ jobs:
 
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "pr=" >> "$GITHUB_OUTPUT"
-      - name: Run OpenCode (pinned)
+      - name: Run OpenCode
         id: oc
         if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
-        uses: anomalyco/opencode/github@${{ inputs.opencode_action_ref }}
+        uses: anomalyco/opencode/github@v1.1.44
         env:
           ZAI_API_KEY: ${{ env.ZAI_API_KEY }}
           ZHIPU_API_KEY: ${{ env.ZHIPU_API_KEY }}
