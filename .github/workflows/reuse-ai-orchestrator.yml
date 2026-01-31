@@ -160,7 +160,7 @@ jobs:
           {
             echo "prompt<<'EO_PROMPT'"
             cat "$PROMPT_PATH"
-            echo "EO_PROMPT"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
       - name: Check existing PR for issue (skip if present)
         id: existing_pr
