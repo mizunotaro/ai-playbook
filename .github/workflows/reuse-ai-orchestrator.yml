@@ -158,7 +158,8 @@ jobs:
 
           # Expose prompt as a multiline output (so OpenCode action receives the prompt text, not a file path)
           {
-            echo "prompt<<'EO_PROMPT'"
+            DELIM="EO_PROMPT_${{ github.run_id }}_${{ github.run_attempt }}"
+            echo "prompt<<$DELIM"
             cat "$PROMPT_PATH"
             echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
