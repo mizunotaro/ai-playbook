@@ -158,9 +158,7 @@ jobs:
 
           # Expose prompt as a multiline output (so OpenCode action receives the prompt text, not a file path)
           {
-            echo "prompt<<'EO_PROMPT'"
             cat "$PROMPT_PATH"
-            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
       - name: Check existing PR for issue (skip if present)
         id: existing_pr
