@@ -6,6 +6,21 @@ on:
       model:
         type: string
         required: true
+      opencode_version:
+        description: "Pin OpenCode CLI version to avoid regressions (e.g., 1.1.44)."
+        type: string
+        required: false
+        default: "1.1.44"
+      opencode_action_ref:
+        description: "Git ref (tag/sha) for anomalyco/opencode GitHub Action (path: /github)."
+        type: string
+        required: false
+        default: "v1.1.44"
+      job_timeout_minutes:
+        description: "Job timeout (minutes) for the orchestrator job."
+        type: number
+        required: false
+        default: 45
     secrets:
       ZAI_API_KEY:
         required: false
@@ -15,7 +30,7 @@ on:
 jobs:
   orchestrate:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
 
     permissions:
       id-token: write
@@ -39,7 +54,6 @@ jobs:
             exit 0
           fi
           echo "run=true" >> "$GITHUB_OUTPUT"
-
       - name: Normalize provider API key env
         id: keys
         if: steps.preflight.outputs.run == 'true'
@@ -56,153 +70,218 @@ jobs:
           fi
           echo "ZAI_API_KEY=${API_KEY}" >> "$GITHUB_ENV"
           echo "ZHIPU_API_KEY=${API_KEY}" >> "$GITHUB_ENV"
-
       - name: Check open AI PR count
         id: prgate
         if: steps.preflight.outputs.run == 'true'
         shell: bash
         run: |
+          set -euo pipefail
           MAX="${{ vars.AI_MAX_OPEN_AI_PRS }}"
           [ -z "$MAX" ] && MAX="1"
           OPEN_AI_PRS=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "ai:in-progress" --json number --jq 'length')
           echo "OPEN_AI_PRS=$OPEN_AI_PRS MAX=$MAX"
           if [ "$OPEN_AI_PRS" -ge "$MAX" ]; then
             echo "Too many open AI PRs. Exiting."
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "proceed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout
-        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true'
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Remove checkout auth header (avoid duplicate Authorization)
-        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true'
-        shell: bash
-        run: |
-          git config --local --unset-all http.https://github.com/.extraheader || true
-          git config --global --unset-all http.https://github.com/.extraheader || true
-
-      - name: Pick next issue from queue
-        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true'
+          echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Pick next issue (ai:ready -> ai:in-progress)
         id: pick
-        shell: bash
-        run: |
-          ISSUE=$(gh api -X GET search/issues             -f q="repo:${GITHUB_REPOSITORY} is:issue is:open label:ai:ready -label:ai:blocked -label:ai:pr-open sort:created-asc"             --jq '.items[0].number // empty')
-          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
-          if [ -z "$ISSUE" ]; then
-            echo "No queued issues."
-            exit 0
-          fi
-          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:ready" --add-label "ai:in-progress"
-
-      - name: Skip if an open PR already references this issue
-        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
-        id: existing_pr
+        if: steps.prgate.outputs.run == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          ISSUE="${{ steps.pick.outputs.issue }}"
 
-          # If an open PR already references this Issue number, don't re-run the agent.
-          PRS_JSON=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,title,body)
-          PR=$(echo "$PRS_JSON" | jq -r --arg issue "$ISSUE" 'map(select((.title + "\n" + (.body // "")) | test("#" + $issue; "i"))) | .[0].number // empty')
-
-          if [ -n "$PR" ]; then
-            echo "Found existing open PR #$PR for Issue #$ISSUE. Skipping."
-            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "Open PR #$PR already references this issue. Marking as ai:pr-open to prevent re-run."
-          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "ai:ready" --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -z "$ISSUE" ]; then
+            echo "No ai:ready issues. Exiting."
+            echo "issue=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Picked issue #$ISSUE"
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:ready" --add-label "ai:in-progress"
 
-      - name: Build prompt (workspace + git-exclude)
-        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
+          # Marker comment for recovery/cleanup (e.g., when the job times out)
+          MARKER="opencode-orchestrator-run:${{ github.run_id }} run-number:${{ github.run_number }}"
+          gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "🧭 Orchestrator started. ${MARKER}"
+
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+      - name: "Guard - Skip if no issue"
+        if: steps.pick.outputs.issue == ''
+        run: echo "No issue picked; skipping."
+
+      - name: Checkout
+        if: steps.pick.outputs.issue != ''
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build prompt (from issue)
         id: prompt
+        if: steps.pick.outputs.issue != ''
         shell: bash
         run: |
           set -euo pipefail
           ISSUE="${{ steps.pick.outputs.issue }}"
           TITLE=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json title --jq '.title')
-          BODY=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json body --jq '.body' | head -c 12000)
+          BODY=$(gh issue view --repo "$GITHUB_REPOSITORY" "$ISSUE" --json body --jq '.body')
 
-          # Put prompt in workspace (some agent toolchains can't read outside workspace),
-          # but make sure it can never show up in git status / commits.
-          PROMPT_DIR="${RUNNER_TEMP}/opencode"
-          mkdir -p "$PROMPT_DIR"
-          PROMPT_PATH="$PROMPT_DIR/PROMPT.txt"
+          PROMPT_PATH="$RUNNER_TEMP/opencode_prompt.txt"
+          cat > "$PROMPT_PATH" <<'EOF'
+          You are an AI DevOps/Staff+Security lead operating inside a GitHub Actions runner.
 
-          cat > "$PROMPT_PATH" << 'EOF'
-          You are the Implementation Agent.
+          Follow these constraints:
+          - Do NOT leak secrets.
+          - Do NOT run destructive commands.
+          - Keep the change small (small PR).
+          - Prefer reproducibility: update SSOT docs if needed (PROJECT_ENV_SPEC.md, PROJECT_CONTEXT.md, AGENTS.md, CHEATSHEET_COMMANDS.md).
 
-          NON-NEGOTIABLE GUARDRAILS:
-          - Do NOT change dependencies unless the issue has label "ai:deps".
-          - Keep the diff minimal. Avoid broad refactors.
-          - Add/adjust tests if applicable.
-          - Do not edit secrets, CI credentials, or security-sensitive configs.
-          - Work on the CURRENTLY CHECKED-OUT BRANCH (do NOT create/switch branches).
-          - Do NOT run `git checkout -b` or change the branch name.
-          - Do NOT run `gh pr create` / `gh pr edit`. The OpenCode runner will create/update the PR.
-          - Do NOT `git push`. Commit only; the runner will push.
-          - If the task is ambiguous, STOP and write a short question in the PR description.
-
-          COMMIT MESSAGE FORMAT (EN + JP):
-          - First line: conventional commit in English
-          - Second line: Japanese summary
-
-          TASK:
+          Task:
           EOF
 
-          echo "Work on GitHub Issue #$ISSUE: $TITLE" >> "$PROMPT_PATH"
-          echo "" >> "$PROMPT_PATH"
-          echo "Issue body (truncated):" >> "$PROMPT_PATH"
-          echo "$BODY" >> "$PROMPT_PATH"
-          echo "" >> "$PROMPT_PATH"
-          echo "Deliverable: commit the minimal changes on the current branch; OpenCode will create the PR automatically. Ensure the PR description references (e.g., \"Closes #$ISSUE\")." >> "$PROMPT_PATH"
+          {
+            echo "Issue: #$ISSUE"
+            echo "Title: $TITLE"
+            echo ""
+            echo "$BODY"
+            echo ""
+            echo "Acceptance Criteria:"
+            echo "- Produce a PR that addresses the issue, with CI green."
+            echo "- If blocked, explain why and propose the minimum SSOT/steps changes."
+          } >> "$PROMPT_PATH"
 
-          echo "path=$PROMPT_PATH" >> "$GITHUB_OUTPUT"
-
-      - name: Run OpenCode
-        id: oc
-        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != ''
-        continue-on-error: true
-        uses: anomalyco/opencode/github@latest
-        with:
-          model: ${{ inputs.model }}
-          prompt: ${{ steps.prompt.outputs.path }}
-
-
-      - name: Normalize Issue label to ai:pr-open on successful PR creation
-        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != '' && steps.oc.outcome == 'success'
+          # Expose prompt as a multiline output (so OpenCode action receives the prompt text, not a file path)
+          {
+            echo "prompt<<'EO_PROMPT'"
+            cat "$PROMPT_PATH"
+            echo "EO_PROMPT"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check existing PR for issue (skip if present)
+        id: existing_pr
+        if: steps.pick.outputs.issue != ''
         shell: bash
         run: |
           set -euo pipefail
           ISSUE="${{ steps.pick.outputs.issue }}"
 
-          # Find an open PR that references this issue number (e.g., "Closes #<ISSUE>").
-          PR="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,title,body --jq             ".[] | select((.title + "\n" + (.body // "")) | test(\"(^|[^0-9])#${ISSUE}([^0-9]|$)\"); \"i\")) | .number"             | head -n 1)"
+          # Search open PRs that mention this issue number in title/body (best-effort)
+          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --search "#$ISSUE" --json number --jq '.[0].number // empty')
 
-          if [ -z "${PR:-}" ]; then
-            echo "No open PR references issue #$ISSUE; leaving labels unchanged."
+          if [ -n "$PR" ]; then
+            echo "Found existing open PR (#$PR) for issue #$ISSUE. Skipping OpenCode."
+            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "ℹ️ Existing PR already open: #$PR (skipping OpenCode run)"
+            gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "pr=$PR" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"; then
-            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "PR #$PR is open for this issue. Normalized label to \`ai:pr-open\`."
-          else
-            echo "::warning::Failed to set ai:pr-open (label may not exist)."
-          fi
-      - name: Revert issue label and fail if OpenCode failed
-        if: steps.preflight.outputs.run == 'true' && steps.prgate.outputs.proceed == 'true' && steps.pick.outputs.issue != '' && steps.oc.outcome != 'success'
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "pr=" >> "$GITHUB_OUTPUT"
+      - name: Run OpenCode (pinned)
+        id: oc
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
+        uses: anomalyco/opencode/github@${{ inputs.opencode_action_ref }}
+        env:
+          ZAI_API_KEY: ${{ env.ZAI_API_KEY }}
+          ZHIPU_API_KEY: ${{ env.ZHIPU_API_KEY }}
+          OPENCODE_DISABLE_AUTOUPDATE: "true"
+          VERSION: ${{ inputs.opencode_version }}
+        with:
+          model: ${{ inputs.model }}
+          prompt: ${{ steps.prompt.outputs.prompt }}
+
+      - name: Detect PR created by this run
+        id: pr
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
         shell: bash
         run: |
+          set -euo pipefail
+          RUN_NO="${{ github.run_number }}"
+
+          # Preferred: match OpenCode's default dispatch branch naming pattern seen in logs: opencode/dispatch-<run_number>-<timestamp>
+          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"opencode/dispatch-${RUN_NO}-\")) | .number" | head -n1)
+
+          # Fallback: any open PR from opencode/* labeled ai:in-progress
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "opencode/*" --label "ai:in-progress" --json number --jq '.[0].number // empty')
+          fi
+
+          if [ -z "$PR" ]; then
+            echo "No PR detected."
+            echo "pr=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Detected PR #$PR"
+            echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Normalize issue label (ai:in-progress -> ai:pr-open)
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true' && steps.pr.outputs.pr != ''
+        shell: bash
+        run: |
+          set -euo pipefail
           ISSUE="${{ steps.pick.outputs.issue }}"
+          PR="${{ steps.pr.outputs.pr }}"
+          gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "✅ PR opened: #$PR"
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"
+      - name: Revert issue label on failure (ai:in-progress -> ai:ready)
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true' && steps.pr.outputs.pr == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISSUE="${{ steps.pick.outputs.issue }}"
+          gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "⚠️ OpenCode did not create a PR in this run. Returning to ai:ready."
           gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
-          echo "::error::OpenCode failed. Reverted Issue #$ISSUE label back to ai:ready."
-          exit 1
+
+  cleanup_on_timeout_or_failure:
+    needs: [orchestrate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      issues: write
+      pull-requests: read
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Recovery (revert ai:in-progress if orchestrator did not finish cleanly)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Only attempt recovery when the main job didn't succeed.
+          RESULT="${{ needs.orchestrate.result }}"
+          if [ "$RESULT" = "success" ]; then
+            echo "Main job succeeded; nothing to recover."
+            exit 0
+          fi
+
+          MARKER="opencode-orchestrator-run:${{ github.run_id }}"
+          ISSUE=$(gh api -X GET search/issues -f q="repo:${GITHUB_REPOSITORY} is:issue is:open label:ai:in-progress ${MARKER}" --jq '.items[0].number // empty')
+
+          if [ -z "$ISSUE" ]; then
+            echo "No matching ai:in-progress issue found for this run."
+            exit 0
+          fi
+
+          echo "Found in-progress issue #$ISSUE for this run."
+
+          RUN_NO="${{ github.run_number }}"
+          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"opencode/dispatch-${RUN_NO}-\")) | .number" | head -n1 || true)
+
+          if [ -n "$PR" ]; then
+            echo "PR exists (#$PR). Normalizing issue to ai:pr-open."
+            gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "✅ (Recovery) PR detected after timeout/failure: #$PR"
+            gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:pr-open"
+            exit 0
+          fi
+
+          echo "No PR detected. Returning issue to ai:ready."
+          gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "⏱️ (Recovery) Orchestrator job ended as '${RESULT}' without opening a PR. Returning to ai:ready."
+          gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
