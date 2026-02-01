@@ -39,7 +39,7 @@ jobs:
           fi
 
           echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          gh run view "$RUN_ID" --log-failed > FAILED.log || true
+          gh run view --repo "$GITHUB_REPOSITORY" "$RUN_ID" --log-failed > FAILED.log || true
           head -c 12000 FAILED.log > FAILED_TRUNC.log || true
           echo "log=FAILED_TRUNC.log" >> $GITHUB_OUTPUT
 
