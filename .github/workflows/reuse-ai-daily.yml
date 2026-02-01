@@ -20,17 +20,17 @@ jobs:
           OPEN_AI_PRS=$(gh pr list --state open --label "ai:in-progress" --json number --jq 'length')
 
           BODY=$(cat << EOF
-## Daily AI Report (UTC) - $(date -u +"%Y-%m-%d")
-
-- Queue (ai:ready): $OPEN_READY
-- Blocked (ai:blocked): $OPEN_BLOCKED
-- Open AI PRs (ai:in-progress): $OPEN_AI_PRS
-
-Decision points (if any):
-- If blocked > 0: review ai:blocked issues and decide: approve / clarify / pause.
-
-EOF
-)
+          ## Daily AI Report (UTC) - $(date -u +"%Y-%m-%d")
+          
+          - Queue (ai:ready): $OPEN_READY
+          - Blocked (ai:blocked): $OPEN_BLOCKED
+          - Open AI PRs (ai:in-progress): $OPEN_AI_PRS
+          
+          Decision points (if any):
+          - If blocked > 0: review ai:blocked issues and decide: approve / clarify / pause.
+          
+          EOF
+          )
 
           # JP: 固定Issueが無い場合は作る / EN: create if missing
           DASH_ID=$(gh issue list --state open --search "AI Ops Dashboard" --json number --jq '.[0].number // empty')

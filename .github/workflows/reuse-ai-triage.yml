@@ -48,21 +48,21 @@ jobs:
         shell: bash
         run: |
           cat > TRIAGE_PROMPT.txt << 'EOF'
-You are the Triage Agent.
-
-GOAL:
-- Identify the root cause of the CI failure from the provided failed logs.
-- Prepare a minimal fix.
-- If the fix would be risky or large, STOP and open an issue with options instead of code changes.
-
-GUARDRAILS:
-- Do NOT do broad refactors.
-- Do NOT change dependencies unless label "ai:deps" is present.
-- Keep changes minimal and add tests only if necessary.
-- Commit message EN+JP (same format as Implementation Agent).
-
-FAILED LOG (truncated):
-EOF
+          You are the Triage Agent.
+          
+          GOAL:
+          - Identify the root cause of the CI failure from the provided failed logs.
+          - Prepare a minimal fix.
+          - If the fix would be risky or large, STOP and open an issue with options instead of code changes.
+          
+          GUARDRAILS:
+          - Do NOT do broad refactors.
+          - Do NOT change dependencies unless label "ai:deps" is present.
+          - Keep changes minimal and add tests only if necessary.
+          - Commit message EN+JP (same format as Implementation Agent).
+          
+          FAILED LOG (truncated):
+          EOF
           cat "${{ steps.run.outputs.log }}" >> TRIAGE_PROMPT.txt
 
           echo "path=TRIAGE_PROMPT.txt" >> $GITHUB_OUTPUT
