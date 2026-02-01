@@ -20,7 +20,7 @@ jobs:
           echo "Recent CI failures (sample window) = $FAILS"
 
           if [ "$FAILS" -ge 3 ]; then
-            gh issue create \
+            gh issue create --repo "$GITHUB_REPOSITORY" \
               --title "AI Watchdog: PAUSE recommended (failures=$FAILS)" \
               --body "Detected frequent CI failures. Recommend setting AI_AUTOMATION_MODE=PAUSE and running triage." \
               --label "ai:triage"
