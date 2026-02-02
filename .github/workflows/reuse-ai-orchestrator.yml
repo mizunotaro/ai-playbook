@@ -16,12 +16,11 @@ on:
         type: number
         required: false
         default: 45
-    secrets:
       opencode_step_timeout_minutes:
         description: "Per-step timeout (minutes) for the OpenCode step (timing-based)."
         type: number
         required: false
-        default: 20
+        default: 20    secrets:
       ZAI_API_KEY:
         required: false
       ZHIPU_API_KEY:
@@ -191,7 +190,7 @@ jobs:
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "pr=" >> "$GITHUB_OUTPUT"
       - name: Run OpenCode
-        	imeout-minutes: ${{ inputs.opencode_step_timeout_minutes }}
+        timeout-minutes: ${{ inputs.opencode_step_timeout_minutes }}
         continue-on-error: true
         id: oc
         if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
@@ -309,3 +308,4 @@ jobs:
           echo "No PR detected. Returning issue to ai:ready."
           gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "[TIME] (Recovery) Orchestrator job ended as '${RESULT}' without opening a PR. Returning to ai:ready."
           gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
+
