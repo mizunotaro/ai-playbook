@@ -157,10 +157,12 @@ jobs:
           } >> "$PROMPT_PATH"
 
           # Expose prompt as a multiline output (so OpenCode action receives the prompt text, not a file path)
+          # NOTE: The delimiter must NOT be quoted. Use a run-unique delimiter to avoid collisions.
+          DELIM="EO_PROMPT_${{ github.run_id }}_${{ github.run_attempt }}"
           {
-            echo "prompt<<'EO_PROMPT'"
+            echo "prompt<<$DELIM"
             cat "$PROMPT_PATH"
-            echo "EO_PROMPT"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
       - name: Check existing PR for issue (skip if present)
         id: existing_pr
