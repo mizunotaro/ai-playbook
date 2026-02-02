@@ -16,6 +16,11 @@ on:
         type: number
         required: false
         default: 45
+      opencode_step_timeout_minutes:
+        description: "Per-step timeout (minutes) for the OpenCode step (timing-based)."
+        type: number
+        required: false
+        default: 20
     secrets:
       ZAI_API_KEY:
         required: false
@@ -186,6 +191,8 @@ jobs:
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "pr=" >> "$GITHUB_OUTPUT"
       - name: Run OpenCode
+        timeout-minutes: ${{ inputs.opencode_step_timeout_minutes }}
+        continue-on-error: true
         id: oc
         if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
         uses: anomalyco/opencode/github@v1.1.44
@@ -290,7 +297,7 @@ jobs:
           echo "Found in-progress issue #$ISSUE for this run."
 
           RUN_NO="${{ github.run_number }}"
-          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName --jq ".[] | select(.headRefName | startswith(\"opencode/dispatch-${RUN_NO}-\")) | .number" | head -n1 || true)
+          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --search "#$ISSUE" --json number,headRefName --jq '.[] | select(.headRefName | startswith("opencode/")) | .number' | head -n1 || true)
 
           if [ -n "$PR" ]; then
             echo "PR exists (#$PR). Normalizing issue to ai:pr-open."
@@ -302,3 +309,6 @@ jobs:
           echo "No PR detected. Returning issue to ai:ready."
           gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "[TIME] (Recovery) Orchestrator job ended as '${RESULT}' without opening a PR. Returning to ai:ready."
           gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
+
+
+
