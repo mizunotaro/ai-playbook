@@ -15,7 +15,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # JP: 直近のCI失敗回数（例） / EN: count recent CI failures
-          FAILS=$(gh run list --workflow "CI" --limit 50 --json conclusion,createdAt \
+          FAILS=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "CI" --limit 50 --json conclusion,createdAt \
             --jq '[.[] | select(.conclusion=="failure")] | length')
           echo "Recent CI failures (sample window) = $FAILS"
 

@@ -6,6 +6,12 @@ on:
       model:
         type: string
         required: true
+      failing_run_id:
+        type: string
+        required: false
+      failing_run_url:
+        type: string
+        required: false
     secrets:
       ZAI_API_KEY:
         required: true
@@ -31,16 +37,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # workflow_run で来た場合
-          RUN_ID="${{ github.event.workflow_run.id }}"
+          # Prefer workflow_call inputs (from dispatcher -> workflow_dispatch) and keep workflow_run fallback
+          RUN_ID="${{ inputs.failing_run_id }}"
+          RUN_URL="${{ inputs.failing_run_url }}"
           if [ -z "$RUN_ID" ]; then
-            echo "Not a workflow_run event. Exiting."
+            RUN_ID="${{ github.event.workflow_run.id }}"
+            RUN_URL="${{ github.event.workflow_run.html_url }}"
+          fi
+
+          if [ -z "$RUN_ID" ]; then
+            echo "No failing run id (inputs.failing_run_id / workflow_run.id). Exiting."
             exit 0
           fi
 
           echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          gh run view --repo "$GITHUB_REPOSITORY" "$RUN_ID" --log-failed > FAILED.log || true
-          head -c 12000 FAILED.log > FAILED_TRUNC.log || true
+          echo "run_url=$RUN_URL" >> $GITHUB_OUTPUT
+          gh run view --repo "$GITHUB_REPOSITORY" "$RUN_ID" --log-failed > FAILED.log || true          head -c 12000 FAILED.log > FAILED_TRUNC.log || true
           echo "log=FAILED_TRUNC.log" >> $GITHUB_OUTPUT
 
       - name: Build triage prompt
