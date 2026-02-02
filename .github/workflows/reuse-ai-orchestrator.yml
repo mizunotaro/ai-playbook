@@ -20,7 +20,8 @@ on:
         description: "Per-step timeout (minutes) for the OpenCode step (timing-based)."
         type: number
         required: false
-        default: 20    secrets:
+        default: 20
+    secrets:
       ZAI_API_KEY:
         required: false
       ZHIPU_API_KEY:
@@ -308,4 +309,6 @@ jobs:
           echo "No PR detected. Returning issue to ai:ready."
           gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "[TIME] (Recovery) Orchestrator job ended as '${RESULT}' without opening a PR. Returning to ai:ready."
           gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
+
+
 
