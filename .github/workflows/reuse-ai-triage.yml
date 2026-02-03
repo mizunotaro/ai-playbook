@@ -1,1 +1,181 @@
-<PASTE THE FULL YAML FROM ABOVE HERE>
+name: Reusable - AI Triage
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        required: true
+      failing_run_id:
+        type: string
+        required: true
+      failing_run_url:
+        type: string
+        required: false
+        default: ""
+      opencode_version:
+        type: string
+        required: false
+        default: "1.1.44"
+      opencode_step_timeout_minutes:
+        type: number
+        required: false
+        default: 20
+    secrets:
+      ZAI_API_KEY:
+        required: false
+      ZHIPU_API_KEY:
+        required: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Preflight (mode)
+        id: preflight
+        shell: bash
+        run: |
+          echo "AI_AUTOMATION_MODE=${{ vars.AI_AUTOMATION_MODE }}"
+          if [ "${{ vars.AI_AUTOMATION_MODE }}" != "RUN" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize provider API key env
+        id: keys
+        if: steps.preflight.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_KEY="${{ secrets.ZAI_API_KEY }}"
+          if [ -z "${API_KEY}" ]; then
+            API_KEY="${{ secrets.ZHIPU_API_KEY }}"
+          fi
+          if [ -z "${API_KEY}" ]; then
+            echo "::error::Missing secret: set either ZAI_API_KEY or ZHIPU_API_KEY in the caller repo."
+            exit 1
+          fi
+          echo "ZAI_API_KEY=${API_KEY}" >> "$GITHUB_ENV"
+
+      - name: Fetch failing run metadata (and PR if any)
+        id: runmeta
+        if: steps.preflight.outputs.run == 'true'
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.failing_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p triage_artifacts
+          gh api -X GET "repos/${GH_REPO}/actions/runs/${RUN_ID}" > triage_artifacts/run.json
+          PR_NUMBER=$(jq -r '.pull_requests[0].number // empty' triage_artifacts/run.json)
+          echo "pr=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch failing run logs (best-effort)
+        if: steps.preflight.outputs.run == 'true'
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.failing_run_id }}
+        run: |
+          set -euo pipefail
+          # Text logs (best-effort). Avoid failing the whole job if logs cannot be fetched.
+          gh run view -R "${GH_REPO}" "${RUN_ID}" --log > triage_artifacts/run.log.txt || true
+
+      - name: Build OpenCode prompt
+        id: prompt
+        if: steps.preflight.outputs.run == 'true'
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.failing_run_id }}
+          RUN_URL: ${{ inputs.failing_run_url }}
+        run: |
+          set -euo pipefail
+          DELIM="DELIM_$(date +%s)_$RANDOM"
+          {
+            echo "prompt<<${DELIM}"
+            echo "You are the AI Triage agent."
+            echo ""
+            echo "Repository: ${GH_REPO}"
+            echo "Failing run id: ${RUN_ID}"
+            echo "Failing run url: ${RUN_URL}"
+            echo ""
+            echo "Artifacts:"
+            echo "- triage_artifacts/run.json (workflow run metadata)"
+            echo "- triage_artifacts/run.log.txt (best-effort log text)"
+            echo ""
+            echo "Tasks:"
+            echo "1) Identify the root cause category (YAML syntax, PS ParserError, reusable ref mismatch, permissions, merge conflict, flaky tests, etc.)."
+            echo "2) Propose a minimal, safe fix as a small PR. If uncertain, propose a diagnostic patch (more logs) first."
+            echo "3) Output: concise triage summary + recommended next action."
+            echo ""
+            echo "Constraints:"
+            echo "- Do not print secrets."
+            echo "- Prefer deterministic changes. Avoid large refactors."
+            echo ""
+            echo "${DELIM}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run OpenCode
+        timeout-minutes: ${{ inputs.opencode_step_timeout_minutes }}
+        continue-on-error: true
+        id: oc
+        if: steps.preflight.outputs.run == 'true'
+        uses: anomalyco/opencode/github@v1.1.44
+        env:
+          ZAI_API_KEY: ${{ env.ZAI_API_KEY }}
+          OPENCODE_DISABLE_AUTOUPDATE: "true"
+          VERSION: ${{ inputs.opencode_version }}
+        with:
+          model: ${{ inputs.model }}
+          prompt: ${{ steps.prompt.outputs.prompt }}
+
+      - name: Post triage comment (PR first, fallback to dashboard issue)
+        if: steps.preflight.outputs.run == 'true'
+        shell: bash
+        env:
+          PR: ${{ steps.runmeta.outputs.pr }}
+          RUN_ID: ${{ inputs.failing_run_id }}
+          RUN_URL: ${{ inputs.failing_run_url }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat << EOF
+          ## AI Triage Result
+
+          - Run: ${RUN_ID}
+          - URL: ${RUN_URL}
+          - Note: See workflow run logs and OpenCode output above.
+
+          EOF
+          )
+
+          if [ -n "${PR}" ]; then
+            gh pr comment -R "${GH_REPO}" "${PR}" --body "${BODY}"
+            exit 0
+          fi
+
+          # fallback: dashboard issue
+          DASH_ID=$(gh issue list --repo "${GH_REPO}" --state open --search "AI Ops Dashboard" --json number --jq '.[0].number // empty')
+          if [ -z "${DASH_ID}" ]; then
+            DASH_ID=$(gh issue create --repo "${GH_REPO}" --title "AI Ops Dashboard" --body "Triage results will be posted here." --label "ai:triage" --json number --jq '.number')
+          fi
+          gh issue comment --repo "${GH_REPO}" "${DASH_ID}" --body "${BODY}"
+
+      - name: Upload artifacts
+        if: steps.preflight.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-triage-artifacts
+          path: triage_artifacts
