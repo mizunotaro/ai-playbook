@@ -80,9 +80,10 @@ jobs:
           echo "path=TRIAGE_PROMPT.txt" >> $GITHUB_OUTPUT
 
       - name: Run OpenCode (triage fix)
-        uses: anomalyco/opencode/github@latest
+        uses: anomalyco/opencode/github@v1.1.44
         with:
           model: ${{ inputs.model }}
           prompt: ${{ steps.prompt.outputs.path }}
         env:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+
