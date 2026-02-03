@@ -1,1 +1,89 @@
-<PASTE THE FULL YAML FROM ABOVE HERE>
+name: Reusable - AI Triage
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        required: true
+      failing_run_id:
+        type: string
+        required: false
+      failing_run_url:
+        type: string
+        required: false
+    secrets:
+      ZAI_API_KEY:
+        required: true
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Gate (respect AI_AUTOMATION_MODE)
+        shell: bash
+        run: |
+          MODE="${{ vars.AI_AUTOMATION_MODE }}"
+          echo "MODE=$MODE"
+          if [ "$MODE" = "PAUSE" ]; then
+            echo "Paused: triage still allowed, continuing."
+          fi
+
+      - name: Extract failing run info
+        id: run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Prefer workflow_call inputs (from dispatcher -> workflow_dispatch) and keep workflow_run fallback
+          RUN_ID="${{ inputs.failing_run_id }}"
+          RUN_URL="${{ inputs.failing_run_url }}"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID="${{ github.event.workflow_run.id }}"
+            RUN_URL="${{ github.event.workflow_run.html_url }}"
+          fi
+
+          if [ -z "$RUN_ID" ]; then
+            echo "No failing run id (inputs.failing_run_id / workflow_run.id). Exiting."
+            exit 0
+          fi
+
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "run_url=$RUN_URL" >> $GITHUB_OUTPUT
+          gh run view --repo "$GITHUB_REPOSITORY" "$RUN_ID" --log-failed > FAILED.log || true          head -c 12000 FAILED.log > FAILED_TRUNC.log || true
+          echo "log=FAILED_TRUNC.log" >> $GITHUB_OUTPUT
+
+      - name: Build triage prompt
+        id: prompt
+        shell: bash
+        run: |
+          cat > TRIAGE_PROMPT.txt << 'EOF'
+          You are the Triage Agent.
+          
+          GOAL:
+          - Identify the root cause of the CI failure from the provided failed logs.
+          - Prepare a minimal fix.
+          - If the fix would be risky or large, STOP and open an issue with options instead of code changes.
+          
+          GUARDRAILS:
+          - Do NOT do broad refactors.
+          - Do NOT change dependencies unless label "ai:deps" is present.
+          - Keep changes minimal and add tests only if necessary.
+          - Commit message EN+JP (same format as Implementation Agent).
+          
+          FAILED LOG (truncated):
+          EOF
+          cat "${{ steps.run.outputs.log }}" >> TRIAGE_PROMPT.txt
+
+          echo "path=TRIAGE_PROMPT.txt" >> $GITHUB_OUTPUT
+
+      - name: Run OpenCode (triage fix)
+        uses: anomalyco/opencode/github@v1.1.44
+        with:
+          model: ${{ inputs.model }}
+          prompt: ${{ steps.prompt.outputs.path }}
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+
