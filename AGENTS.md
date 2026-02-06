@@ -69,3 +69,7 @@
 
 ## 7. 更新履歴
 - 260204 v1.0.0: versioned SSOT 追加（初版）
+
+## Auto-merge policy（参照）
+- Auto-merge policy: AUTO_MERGE_POLICY.md（default=PAUSE / 決定論ゲート / 証跡必須）
+
