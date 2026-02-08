@@ -10,12 +10,27 @@ on:
         description: "Pin OpenCode CLI version to avoid regressions (e.g., 1.1.44)."
         type: string
         required: false
-        default: "1.1.44"
+        default: "0"
       job_timeout_minutes:
         description: "Job timeout (minutes) for the orchestrator job."
         type: number
         required: false
         default: 45
+      enable_fallback:
+        description: "Enable in-job fallback execution when OpenCode fails."
+        type: boolean
+        required: false
+        default: true
+      model_fallback:
+        description: "Fallback model (e.g., zai-coding-plan/glm-4.6) used when primary model fails."
+        type: string
+        required: false
+        default: "zai-coding-plan/glm-4.6"
+      opencode_version_fallback:
+        description: "Fallback OpenCode CLI version (optional). If empty, reuse opencode_version."
+        type: string
+        required: false
+        default: "1.1.44"
       opencode_step_timeout_minutes:
         description: "Per-step timeout (minutes) for the OpenCode step (timing-based)."
         type: number
@@ -37,6 +52,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      actions: read
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -190,7 +206,7 @@ jobs:
 
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "pr=" >> "$GITHUB_OUTPUT"
-      - name: Run OpenCode
+      - name: Run OpenCode (primary)
         timeout-minutes: ${{ inputs.opencode_step_timeout_minutes }}
         continue-on-error: true
         id: oc
@@ -205,6 +221,31 @@ jobs:
           model: ${{ inputs.model }}
           prompt: ${{ steps.prompt.outputs.prompt }}
 
+      - name: Run OpenCode (fallback)
+        timeout-minutes: ${{ inputs.opencode_step_timeout_minutes }}
+        continue-on-error: true
+        id: oc_fb
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true' && inputs.enable_fallback && steps.oc.outcome != 'success' && inputs.model_fallback != ''
+        uses: anomalyco/opencode/github@v1.1.44
+        env:
+          ZAI_API_KEY: ${{ env.ZAI_API_KEY }}
+          ZHIPU_API_KEY: ${{ env.ZHIPU_API_KEY }}
+          OPENCODE_DISABLE_AUTOUPDATE: "true"
+          VERSION: ${{ inputs.opencode_version_fallback != '' && inputs.opencode_version_fallback || inputs.opencode_version }}
+        with:
+          model: ${{ inputs.model_fallback }}
+          prompt: ${{ steps.prompt.outputs.prompt }}
+      - name: Guard: fail if OpenCode did not succeed (primary + fallback)
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Primary outcome=${{ steps.oc.outcome }} conclusion=${{ steps.oc.conclusion }}"
+          echo "Fallback outcome=${{ steps.oc_fb.outcome }} conclusion=${{ steps.oc_fb.conclusion }}"
+          if [ "${{ steps.oc.outcome }}" != "success" ] && [ "${{ steps.oc_fb.outcome }}" != "success" ]; then
+            echo "::error::OpenCode failed (primary+fallback)."
+            exit 1
+          fi
       - name: Detect PR created by this run
         id: pr
         if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
@@ -240,6 +281,15 @@ jobs:
           else
             echo "Detected PR #$PR (branch=${BRANCH:-<unknown>})."
             echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Guard: fail if no PR was created/detected
+        if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ steps.pr.outputs.pr }}" ]; then
+            echo "::error::No PR detected after OpenCode run. Treat as failure."
+            exit 1
           fi
       - name: Normalize issue label (ai:in-progress -> ai:pr-open)
         if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true' && steps.pr.outputs.pr != ''
@@ -309,6 +359,7 @@ jobs:
           echo "No PR detected. Returning issue to ai:ready."
           gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "[TIME] (Recovery) Orchestrator job ended as '${RESULT}' without opening a PR. Returning to ai:ready."
           gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
+
 
 
 
