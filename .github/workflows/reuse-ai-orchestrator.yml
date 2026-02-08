@@ -10,7 +10,7 @@ on:
         description: "Pin OpenCode CLI version to avoid regressions (e.g., 1.1.44)."
         type: string
         required: false
-        default: "0"
+        default: "1.1.53"
       job_timeout_minutes:
         description: "Job timeout (minutes) for the orchestrator job."
         type: number
@@ -235,7 +235,7 @@ jobs:
         with:
           model: ${{ inputs.model_fallback }}
           prompt: ${{ steps.prompt.outputs.prompt }}
-      - name: Guard: fail if OpenCode did not succeed (primary + fallback)
+      - name: "Guard: fail if OpenCode did not succeed (primary + fallback)"
         if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
         shell: bash
         run: |
@@ -282,7 +282,7 @@ jobs:
             echo "Detected PR #$PR (branch=${BRANCH:-<unknown>})."
             echo "pr=$PR" >> "$GITHUB_OUTPUT"
           fi
-      - name: Guard: fail if no PR was created/detected
+      - name: "Guard: fail if no PR was created/detected"
         if: steps.pick.outputs.issue != '' && steps.existing_pr.outputs.skip != 'true'
         shell: bash
         run: |
@@ -359,6 +359,7 @@ jobs:
           echo "No PR detected. Returning issue to ai:ready."
           gh issue comment --repo "$GITHUB_REPOSITORY" "$ISSUE" --body "[TIME] (Recovery) Orchestrator job ended as '${RESULT}' without opening a PR. Returning to ai:ready."
           gh issue edit --repo "$GITHUB_REPOSITORY" "$ISSUE" --remove-label "ai:in-progress" --add-label "ai:ready"
+
 
 
 
